@@ -493,6 +493,11 @@ where
     }
 
     fn poll_available(&mut self, node: &mut rcl_node_t) {
+        // Called on every spin_once: drop the bookkeeping of goal/cancel
+        // requests and is_available() waits whose future was dropped.
+        self.goal_response_channels.retain(|(_, s)| !s.is_canceled());
+        self.cancel_response_channels.retain(|(_, s)| !s.is_canceled());
+        self.poll_available_channels.retain(|s| !s.is_canceled());
         if self.poll_available_channels.is_empty() {
             return;
         }

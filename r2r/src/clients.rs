@@ -95,6 +95,9 @@ where
         let (sender, receiver) = oneshot::channel::<T::Response>();
 
         if result == RCL_RET_OK as i32 {
+            // Forget requests whose future the caller dropped (e.g. timed
+            // out): nobody can receive their reply any more.
+            self.response_channels.retain(|(_, s)| !s.is_canceled());
             self.response_channels.push((seq_no, sender));
             // instead of "canceled" we return invalid client.
             Ok(receiver.map_err(|_| Error::RCL_RET_CLIENT_INVALID))
@@ -121,6 +124,9 @@ impl UntypedClient_ {
         let (sender, receiver) = oneshot::channel::<Result<serde_json::Value>>();
 
         if result == RCL_RET_OK as i32 {
+            // Forget requests whose future the caller dropped (e.g. timed
+            // out): nobody can receive their reply any more.
+            self.response_channels.retain(|(_, s)| !s.is_canceled());
             self.response_channels.push((seq_no, sender));
             // instead of "canceled" we return invalid client.
             Ok(receiver.map_err(|_| Error::RCL_RET_CLIENT_INVALID))
@@ -203,6 +209,11 @@ where
     }
 
     fn poll_available(&mut self, node: &mut rcl_node_t) {
+        // Called on every spin_once: drop the bookkeeping of requests and
+        // is_available() waits whose future was dropped (e.g. a timeout).
+        // A reply that arrives later finds no entry and is discarded.
+        self.response_channels.retain(|(_, s)| !s.is_canceled());
+        self.poll_available_channels.retain(|s| !s.is_canceled());
         if self.poll_available_channels.is_empty() {
             return;
         }
@@ -290,6 +301,11 @@ impl Client_ for UntypedClient_ {
     }
 
     fn poll_available(&mut self, node: &mut rcl_node_t) {
+        // Called on every spin_once: drop the bookkeeping of requests and
+        // is_available() waits whose future was dropped (e.g. a timeout).
+        // A reply that arrives later finds no entry and is discarded.
+        self.response_channels.retain(|(_, s)| !s.is_canceled());
+        self.poll_available_channels.retain(|s| !s.is_canceled());
         if self.poll_available_channels.is_empty() {
             return;
         }
