@@ -290,7 +290,9 @@ impl ActionClient_ for WrappedActionClientUntyped {
                     .map(|(id, _)| id.to_string())
                     .collect::<Vec<_>>()
                     .join(",");
-                log::error!(
+                // Expected when the caller dropped the future (e.g. a timeout):
+                // its entry was pruned, so a late reply has nowhere to go.
+                log::debug!(
                     "no such req id: {}, we have [{}], ignoring",
                     request_id.sequence_number,
                     we_have
@@ -329,7 +331,9 @@ impl ActionClient_ for WrappedActionClientUntyped {
                     .map(|(id, _)| id.to_string())
                     .collect::<Vec<_>>()
                     .join(",");
-                log::error!(
+                // Expected when the caller dropped the future (e.g. a timeout):
+                // its entry was pruned, so a late reply has nowhere to go.
+                log::debug!(
                     "no such req id: {}, we have [{}], ignoring",
                     request_id.sequence_number,
                     we_have
