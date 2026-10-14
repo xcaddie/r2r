@@ -4,6 +4,8 @@ use std::ffi::CString;
 use crate::{error::*, msg_types::*, qos::QosProfile};
 use r2r_rcl::*;
 use std::ffi::{c_void, CStr};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::Arc;
 
 pub trait Subscriber_ {
     fn handle(&self) -> &rcl_subscription_t;
@@ -32,6 +34,112 @@ pub struct UntypedSubscriber {
     pub rcl_handle: rcl_subscription_t,
     pub topic_type: String,
     pub sender: mpsc::Sender<Result<serde_json::Value>>,
+}
+
+/// Shared state of a counting serialized subscription (see
+/// [`Node::subscribe_raw_counting`](crate::Node::subscribe_raw_counting)).
+///
+/// Updated on the spin thread for every message taken; read from anywhere.
+/// All counters are monotonic; a reader computes deltas itself.
+#[derive(Debug, Default)]
+pub struct RawCounterState {
+    count: AtomicU64,
+    bytes: AtomicU64,
+    last_source_timestamp_ns: AtomicI64,
+    last_received_timestamp_ns: AtomicI64,
+}
+
+/// A snapshot of a [`RawCounter`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RawCounterSnapshot {
+    /// Messages taken since the subscription was created.
+    pub count: u64,
+    /// Serialized bytes taken since the subscription was created.
+    pub bytes: u64,
+    /// `rmw_message_info_t::source_timestamp` of the last message (ns, 0 = none or unsupported).
+    pub last_source_timestamp_ns: i64,
+    /// `rmw_message_info_t::received_timestamp` of the last message (ns, 0 = none or unsupported).
+    pub last_received_timestamp_ns: i64,
+}
+
+/// Handle to a counting serialized subscription. Dropping every clone of the
+/// handle removes the subscription when its next message arrives.
+#[derive(Debug, Clone)]
+pub struct RawCounter {
+    state: Arc<RawCounterState>,
+}
+
+impl RawCounter {
+    /// The current counters. Relaxed loads: each field is individually
+    /// consistent; the four are not read atomically together.
+    pub fn snapshot(&self) -> RawCounterSnapshot {
+        RawCounterSnapshot {
+            count: self.state.count.load(Ordering::Relaxed),
+            bytes: self.state.bytes.load(Ordering::Relaxed),
+            last_source_timestamp_ns: self.state.last_source_timestamp_ns.load(Ordering::Relaxed),
+            last_received_timestamp_ns: self
+                .state
+                .last_received_timestamp_ns
+                .load(Ordering::Relaxed),
+        }
+    }
+}
+
+pub(crate) fn make_raw_counter() -> (RawCounter, Arc<RawCounterState>) {
+    let state = Arc::new(RawCounterState::default());
+    (RawCounter { state: state.clone() }, state)
+}
+
+/// Takes every message serialized into a reused buffer and only counts it:
+/// no copy out of the buffer, no allocation per message, no channel.
+pub struct RawCountingSubscriber {
+    pub rcl_handle: rcl_subscription_t,
+    pub msg_buf: rcl_serialized_message_t,
+    pub state: Arc<RawCounterState>,
+}
+
+impl Subscriber_ for RawCountingSubscriber {
+    fn handle(&self) -> &rcl_subscription_t {
+        &self.rcl_handle
+    }
+
+    fn handle_incoming(&mut self) -> bool {
+        // Every handle dropped: only this subscriber still holds the state.
+        if Arc::strong_count(&self.state) == 1 {
+            return true;
+        }
+        let mut msg_info = rmw_message_info_t::default();
+        let ret = unsafe {
+            rcl_take_serialized_message(
+                &self.rcl_handle,
+                &mut self.msg_buf as *mut rcl_serialized_message_t,
+                &mut msg_info,
+                std::ptr::null_mut(),
+            )
+        };
+        if ret != RCL_RET_OK as i32 {
+            // RCL_RET_SUBSCRIPTION_TAKE_FAILED: nothing was there (spurious wake).
+            return false;
+        }
+        self.state.count.fetch_add(1, Ordering::Relaxed);
+        self.state
+            .bytes
+            .fetch_add(self.msg_buf.buffer_length as u64, Ordering::Relaxed);
+        self.state
+            .last_source_timestamp_ns
+            .store(msg_info.source_timestamp, Ordering::Relaxed);
+        self.state
+            .last_received_timestamp_ns
+            .store(msg_info.received_timestamp, Ordering::Relaxed);
+        false
+    }
+
+    fn destroy(&mut self, node: &mut rcl_node_t) {
+        unsafe {
+            rcl_subscription_fini(&mut self.rcl_handle, node);
+            rcutils_uint8_array_fini(&mut self.msg_buf as *mut rcl_serialized_message_t);
+        }
+    }
 }
 
 pub struct RawSubscriber {

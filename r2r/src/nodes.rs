@@ -752,6 +752,52 @@ impl Node {
         Ok(receiver)
     }
 
+    /// Subscribe to a ROS topic and only count what arrives.
+    ///
+    /// Each message is taken serialized (`rcl_take_serialized_message`) into
+    /// one buffer this subscription reuses; it is never deserialized, copied
+    /// out or sent anywhere. The returned [`RawCounter`] exposes the message
+    /// and byte counts and the last message's source/received timestamps.
+    /// Meant for liveness and delivery-rate monitors that would otherwise pay
+    /// a copy and a wake-up per message (`subscribe_raw`).
+    ///
+    /// The subscription lives until every clone of the handle is dropped; like
+    /// `subscribe_raw`, it notices that at its next message and is removed then.
+    pub fn subscribe_raw_counting(
+        &mut self, topic: &str, topic_type: &str, qos_profile: QosProfile,
+    ) -> Result<RawCounter> {
+        // A type support is still needed to create the subscription (see subscribe_raw).
+        let msg = WrappedNativeMsgUntyped::new_from(topic_type)?;
+        let mut msg_buf: rcl_serialized_message_t =
+            unsafe { rcutils_get_zero_initialized_uint8_array() };
+        let ret = unsafe {
+            rcutils_uint8_array_init(
+                &mut msg_buf as *mut rcl_serialized_message_t,
+                0,
+                &rcutils_get_default_allocator(),
+            )
+        };
+        if ret != RCL_RET_OK as i32 {
+            return Err(Error::from_rcl_error(ret));
+        }
+        let subscription_handle =
+            match create_subscription_helper(self.node_handle.as_mut(), topic, msg.ts, qos_profile) {
+                Ok(h) => h,
+                Err(e) => {
+                    unsafe { rcutils_uint8_array_fini(&mut msg_buf as *mut rcl_serialized_message_t) };
+                    return Err(e);
+                }
+            };
+        let (handle, state) = make_raw_counter();
+        let ws = RawCountingSubscriber {
+            rcl_handle: subscription_handle,
+            msg_buf,
+            state,
+        };
+        self.subscribers.push(Box::new(ws));
+        Ok(handle)
+    }
+
     /// Create a ROS service.
     ///
     /// This function returns a `Stream` of `ServiceRequest`:s. Call

@@ -89,6 +89,7 @@ mod utils;
 pub use utils::*;
 
 mod subscribers;
+pub use subscribers::{RawCounter, RawCounterSnapshot};
 
 mod publishers;
 pub use publishers::{Publisher, PublisherUntyped};
